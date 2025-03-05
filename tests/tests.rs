@@ -1,26 +1,256 @@
-// //! Tests for the `cis2_wCCD` contract.
-// use cis2_wccd::*;
-// use concordium_cis2::*;
-// use concordium_smart_contract_testing::*;
-// use concordium_std_derive::*;
+//! Tests for the `token` contract.
+use concordium_cis2::*;
+use concordium_smart_contract_testing::*;
+use concordium_std_derive::*;
+use token::*;
 
-// /// The tests accounts.
-// const ALICE: AccountAddress =
-//     account_address!("2wkBET2rRgE8pahuaczxKbmv7ciehqsne57F9gtzf1PVdr2VP3");
-// const ALICE_ADDR: Address = Address::Account(ALICE);
-// const BOB: AccountAddress = account_address!("2xBpaHottqhwFZURMZW4uZduQvpxNDSy46iXMYs9kceNGaPpZX");
-// const BOB_ADDR: Address = Address::Account(BOB);
-// const CHARLIE: AccountAddress =
-//     account_address!("2xdTv8awN1BjgYEw8W1BVXVtiEwG2b29U8KoZQqJrDuEqddseE");
+/// The tests accounts.
+const ALICE: AccountAddress =
+    account_address!("2wkBET2rRgE8pahuaczxKbmv7ciehqsne57F9gtzf1PVdr2VP3");
+const ALICE_ADDR: Address = Address::Account(ALICE);
+const BOB: AccountAddress = account_address!("2xBpaHottqhwFZURMZW4uZduQvpxNDSy46iXMYs9kceNGaPpZX");
+const BOB_ADDR: Address = Address::Account(BOB);
 
-// /// Initial balance of the accounts.
-// const ACC_INITIAL_BALANCE: Amount = Amount::from_ccd(10000);
+/// Initial balance of the accounts.
+const ACC_INITIAL_BALANCE: Amount = Amount::from_ccd(10000);
 
-// /// A signer for all the transactions.
-// const SIGNER: Signer = Signer::with_one_key();
+/// A signer for all the transactions.
+const SIGNER: Signer = Signer::with_one_key();
 
-// /// The metadata url for testing.
-// const METADATA_URL: &str = "https://example.com";
+/// The metadata url for testing.
+const METADATA_URL: &str = "https://example.com";
+
+/// Test no-restriction transfer where sender is the owner.
+#[test]
+fn test_account_transfer() {
+    let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
+
+    // Transfer one token from Alice to Bob.
+    let transfer_params = StateTransitionParameter {
+        in_utxos: vec![UTXO {
+            utxo_index: 0u64,
+            spending_restriction: SpendingRestriction::NoRestriction(ContractTokenAmount::from(
+                100u64,
+            )),
+        }],
+        out_utxos: vec![
+            UTXOToCreate {
+                recipient: ALICE_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::NoRestriction(
+                    ContractTokenAmount::from(99u64),
+                ),
+            },
+            UTXOToCreate {
+                recipient: BOB_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::NoRestriction(
+                    ContractTokenAmount::from(1u64),
+                ),
+            },
+        ],
+    };
+
+    let update = chain
+        .contract_update(
+            SIGNER,
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.transfer".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&transfer_params)
+                    .expect("No restriction transfer params"),
+            },
+        )
+        .expect("No restriction transfer tokens");
+
+    // Check that Alice now has 99 tokens and Bob has 1 token.
+    let balances = get_balances(&chain, contract_address);
+    assert_eq!(
+        balances.alice,
+        [(1u64, SpendingRestriction::NoRestriction(99.into()))]
+    );
+    assert_eq!(
+        balances.bob,
+        [(2u64, SpendingRestriction::NoRestriction(1.into()))]
+    );
+
+    // // Check that a single transfer event occurred.
+    // let events = deserialize_update_events(&update);
+    // assert_eq!(
+    //     events,
+    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+    //         token_id: TOKEN_ID_WCCD,
+    //         amount: TokenAmountU64(1),
+    //         from: ALICE_ADDR,
+    //         to: BOB_ADDR,
+    //     })),]
+    // );
+}
+
+/// Test scheduled sender lock transfer where sender is the owner.
+#[test]
+fn test_account_scheduled_sender_lock_transfer() {
+    let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
+
+    // Transfer one token from Alice to Bob.
+    let transfer_params = StateTransitionParameter {
+        in_utxos: vec![UTXO {
+            utxo_index: 0u64,
+            spending_restriction: SpendingRestriction::NoRestriction(ContractTokenAmount::from(
+                100u64,
+            )),
+        }],
+        out_utxos: vec![
+            UTXOToCreate {
+                recipient: ALICE_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::NoRestriction(
+                    ContractTokenAmount::from(99u64),
+                ),
+            },
+            UTXOToCreate {
+                recipient: BOB_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::Lock(ScheduleTransfer {
+                    amount: ContractTokenAmount::from(1u64),
+                    release_time: Timestamp::from_timestamp_millis(1000),
+                }),
+            },
+        ],
+    };
+
+    let update = chain
+        .contract_update(
+            SIGNER,
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.transfer".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&transfer_params)
+                    .expect("Scheduled sender lock transfer params"),
+            },
+        )
+        .expect("Scheduled sender lock transfer tokens to succeed");
+
+    // Check that Alice now has 99 tokens and Bob has 1 token.
+    let balances = get_balances(&chain, contract_address);
+    assert_eq!(
+        balances.alice,
+        [
+            (1u64, SpendingRestriction::NoRestriction(99.into())),
+            (
+                2u64,
+                SpendingRestriction::LockSender(ScheduleTransfer {
+                    amount: ContractTokenAmount::from(1u64),
+                    release_time: Timestamp::from_timestamp_millis(1000),
+                })
+            )
+        ]
+    );
+    assert_eq!(
+        balances.bob,
+        [(
+            2u64,
+            SpendingRestriction::LockRecipient(ScheduleTransfer {
+                amount: ContractTokenAmount::from(1u64),
+                release_time: Timestamp::from_timestamp_millis(1000),
+            })
+        )]
+    );
+
+    // // Check that a single transfer event occurred.
+    // let events = deserialize_update_events(&update);
+    // assert_eq!(
+    //     events,
+    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+    //         token_id: TOKEN_ID_WCCD,
+    //         amount: TokenAmountU64(1),
+    //         from: ALICE_ADDR,
+    //         to: BOB_ADDR,
+    //     })),]
+    // );
+}
+
+/// Test scheduled receiver lock transfer where sender is the owner.
+#[test]
+fn test_account_scheduled_receiver_lock_transfer() {
+    let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
+
+    // Transfer one token from Alice to Bob.
+    let transfer_params = StateTransitionParameter {
+        in_utxos: vec![UTXO {
+            utxo_index: 0u64,
+            spending_restriction: SpendingRestriction::NoRestriction(ContractTokenAmount::from(
+                100u64,
+            )),
+        }],
+        out_utxos: vec![
+            UTXOToCreate {
+                recipient: ALICE_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::NoRestriction(
+                    ContractTokenAmount::from(99u64),
+                ),
+            },
+            UTXOToCreate {
+                recipient: BOB_ADDR,
+                spending_restriction: SpendingRestrictionToCreate::ScheduleTransfer(
+                    ScheduleTransfer {
+                        amount: ContractTokenAmount::from(1u64),
+                        release_time: Timestamp::from_timestamp_millis(1000),
+                    },
+                ),
+            },
+        ],
+    };
+
+    let update = chain
+        .contract_update(
+            SIGNER,
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.transfer".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&transfer_params)
+                    .expect("Scheduled receiver lock transfer params"),
+            },
+        )
+        .expect("Scheduled receiver lock transfer tokens to succeed");
+
+    // Check that Alice now has 99 tokens and Bob has 1 token.
+    let balances = get_balances(&chain, contract_address);
+    assert_eq!(
+        balances.alice,
+        [(1u64, SpendingRestriction::NoRestriction(99.into()))]
+    );
+    assert_eq!(
+        balances.bob,
+        [(
+            2u64,
+            SpendingRestriction::ScheduleTransfer(ScheduleTransfer {
+                amount: ContractTokenAmount::from(1u64),
+                release_time: Timestamp::from_timestamp_millis(1000),
+            })
+        )]
+    );
+
+    // // Check that a single transfer event occurred.
+    // let events = deserialize_update_events(&update);
+    // assert_eq!(
+    //     events,
+    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+    //         token_id: TOKEN_ID_WCCD,
+    //         amount: TokenAmountU64(1),
+    //         from: ALICE_ADDR,
+    //         to: BOB_ADDR,
+    //     })),]
+    // );
+}
 
 // /// Test that init produces the correct logs.
 // #[test]
@@ -58,120 +288,74 @@
 //     );
 // }
 
-// /// Test that only the admin can set the metadata URL.
+/// Test that only the admin can set the metadata URL.
 // #[test]
-// fn test_set_metadata_url() {
+// fn transfer_tokens() {
 //     let (mut chain, contract_address, _) = initialize_contract_with_alice_tokens();
 
 //     let new_metadata_url = "https://new-url.com".to_string();
+//
+// // Construct the parameters.
+// let params = SetMetadataUrlParams {
+//     url: new_metadata_url.clone(),
+//     hash: None,
+// };
 
-//     // Construct the parameters.
-//     let params = SetMetadataUrlParams {
-//         url: new_metadata_url.clone(),
-//         hash: None,
-//     };
+// // Try to set the metadata URL from Bob's account, who is not the admin.
+// let update = chain
+//     .contract_update(
+//         SIGNER,
+//         BOB,
+//         BOB_ADDR,
+//         Energy::from(10000),
+//         UpdateContractPayload {
+//             amount: Amount::zero(),
+//             receive_name: OwnedReceiveName::new_unchecked(
+//                 "cis2_wCCD.setMetadataUrl".to_string(),
+//             ),
+//             address: contract_address,
+//             message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
+//         },
+//     )
+//     .expect_err("SetMetadataUrl");
 
-//     // Try to set the metadata URL from Bob's account, who is not the admin.
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             BOB,
-//             BOB_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked(
-//                     "cis2_wCCD.setMetadataUrl".to_string(),
-//                 ),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
-//             },
-//         )
-//         .expect_err("SetMetadataUrl");
+// // Check that the return value is correct.
+// let rv: ContractError = update.parse_return_value().expect("Parsing ContractError");
+// assert_eq!(rv, ContractError::Unauthorized);
 
-//     // Check that the return value is correct.
-//     let rv: ContractError = update.parse_return_value().expect("Parsing ContractError");
-//     assert_eq!(rv, ContractError::Unauthorized);
+// // Set the metadata URL from Alice's account, who is the admin.
+// let update = chain
+//     .contract_update(
+//         SIGNER,
+//         ALICE,
+//         ALICE_ADDR,
+//         Energy::from(10000),
+//         UpdateContractPayload {
+//             amount: Amount::zero(),
+//             receive_name: OwnedReceiveName::new_unchecked(
+//                 "cis2_wCCD.setMetadataUrl".to_string(),
+//             ),
+//             address: contract_address,
+//             message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
+//         },
+//     )
+//     .expect("SetMetadataUrl");
 
-//     // Set the metadata URL from Alice's account, who is the admin.
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked(
-//                     "cis2_wCCD.setMetadataUrl".to_string(),
-//                 ),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
-//             },
-//         )
-//         .expect("SetMetadataUrl");
+// // Check that the logs are correct.
+// let events = deserialize_update_events(&update);
 
-//     // Check that the logs are correct.
-//     let events = deserialize_update_events(&update);
-
-//     assert_eq!(
-//         events,
-//         [WccdEvent::Cis2Event(Cis2Event::TokenMetadata(
-//             TokenMetadataEvent {
-//                 token_id: TOKEN_ID_WCCD,
-//                 metadata_url: MetadataUrl {
-//                     url: new_metadata_url,
-//                     hash: None,
-//                 },
-//             }
-//         )),]
-//     );
-// }
-
-// /// Test regular transfer where sender is the owner.
-// #[test]
-// fn test_account_transfer() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Transfer one token from Alice to Bob.
-//     let transfer_params = TransferParams::from(vec![concordium_cis2::Transfer {
-//         from: ALICE_ADDR,
-//         to: Receiver::Account(BOB),
-//         token_id: TOKEN_ID_WCCD,
-//         amount: TokenAmountU64(1),
-//         data: AdditionalData::empty(),
-//     }]);
-
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.transfer".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&transfer_params).expect("Transfer params"),
-//             },
-//         )
-//         .expect("Transfer tokens");
-
-//     // Check that Alice now has 99 wCCD and Bob has 1.
-//     let balances = get_balances(&chain, contract_address);
-//     assert_eq!(balances.0, [99.into(), 1.into()]);
-
-//     // Check that a single transfer event occurred.
-//     let events = deserialize_update_events(&update);
-//     assert_eq!(
-//         events,
-//         [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+// assert_eq!(
+//     events,
+//     [WccdEvent::Cis2Event(Cis2Event::TokenMetadata(
+//         TokenMetadataEvent {
 //             token_id: TOKEN_ID_WCCD,
-//             amount: TokenAmountU64(1),
-//             from: ALICE_ADDR,
-//             to: BOB_ADDR,
-//         })),]
-//     );
+//             metadata_url: MetadataUrl {
+//                 url: new_metadata_url,
+//                 hash: None,
+//             },
+//         }
+//     )),]
+// );
 // }
 
 // /// Test that you can add an operator.
@@ -703,75 +887,75 @@
 
 // // Helpers:
 
-// /// Helper function that initializes the contract and wraps 100 microCCD into
-// /// wCCD for Alice.
-// fn initialize_contract_with_alice_tokens() -> (Chain, ContractAddress, ContractInvokeSuccess) {
-//     let (mut chain, init) = initialize_chain_and_contract();
+/// Helper function that initializes the contract and mint 100 tokens to Alice.
+fn initialize_contract_with_alice_tokens() -> (Chain, ContractAddress, ContractInvokeSuccess) {
+    let (mut chain, init) = initialize_chain_and_contract();
 
-//     let wrap_params = WrapParams {
-//         to: Receiver::Account(ALICE),
-//         data: AdditionalData::empty(),
-//     };
+    let wrap_params = MintParams {
+        owner: Receiver::Account(ALICE),
+        amount: ContractTokenAmount::from(100u64),
+        data: AdditionalData::empty(),
+    };
 
-//     // Wrap 100 CCD into wCCD for Alice.
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::from_micro_ccd(100),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.wrap".to_string()),
-//                 address: init.contract_address,
-//                 message: OwnedParameter::from_serial(&wrap_params).expect("Wrap params"),
-//             },
-//         )
-//         .expect("Wrap CCD");
-//     (chain, init.contract_address, update)
-// }
+    // Mint 100 tokens to Alice.
+    let update = chain
+        .contract_update(
+            SIGNER,
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.mint".to_string()),
+                address: init.contract_address,
+                message: OwnedParameter::from_serial(&wrap_params).expect("Mint params"),
+            },
+        )
+        .expect("Mint tokens");
+    (chain, init.contract_address, update)
+}
 
-// /// Setup chain and contract.
-// ///
-// /// Also creates the two accounts, Alice and Bob.
-// ///
-// /// Alice is the owner of the contract.
-// fn initialize_chain_and_contract() -> (Chain, ContractInitSuccess) {
-//     let mut chain = Chain::new();
+/// Setup chain and contract.
+///
+/// Also creates the two accounts, Alice and Bob.
+///
+/// Alice is the owner of the contract.
+fn initialize_chain_and_contract() -> (Chain, ContractInitSuccess) {
+    let mut chain = Chain::new();
 
-//     // Create some accounts on the chain.
-//     chain.create_account(Account::new(ALICE, ACC_INITIAL_BALANCE));
-//     chain.create_account(Account::new(BOB, ACC_INITIAL_BALANCE));
+    // Create some accounts on the chain.
+    chain.create_account(Account::new(ALICE, ACC_INITIAL_BALANCE));
+    chain.create_account(Account::new(BOB, ACC_INITIAL_BALANCE));
 
-//     // Load and deploy the module.
-//     let module = module_load_v1("concordium-out/module.wasm.v1").expect("Module exists");
-//     let deployment = chain
-//         .module_deploy_v1(SIGNER, ALICE, module)
-//         .expect("Deploy valid module");
+    // Load and deploy the module.
+    let module = module_load_v1("concordium-out/module.wasm.v1").expect("Module exists");
+    let deployment = chain
+        .module_deploy_v1(SIGNER, ALICE, module)
+        .expect("Deploy valid module");
 
-//     // Construct the initial parameters.
-//     let params = SetMetadataUrlParams {
-//         url: METADATA_URL.to_string(),
-//         hash: None,
-//     };
+    // Construct the initial parameters.
+    let params = SetMetadataUrlParams {
+        url: METADATA_URL.to_string(),
+        hash: None,
+    };
 
-//     // Initialize the auction contract.
-//     let init = chain
-//         .contract_init(
-//             SIGNER,
-//             ALICE,
-//             Energy::from(10000),
-//             InitContractPayload {
-//                 amount: Amount::zero(),
-//                 mod_ref: deployment.module_reference,
-//                 init_name: OwnedContractName::new_unchecked("init_cis2_wCCD".to_string()),
-//                 param: OwnedParameter::from_serial(&params).expect("Init params"),
-//             },
-//         )
-//         .expect("Initialize contract");
+    // Initialize the auction contract.
+    let init = chain
+        .contract_init(
+            SIGNER,
+            ALICE,
+            Energy::from(10000),
+            InitContractPayload {
+                amount: Amount::zero(),
+                mod_ref: deployment.module_reference,
+                init_name: OwnedContractName::new_unchecked("init_token".to_string()),
+                param: OwnedParameter::from_serial(&params).expect("Init params"),
+            },
+        )
+        .expect("Initialize contract");
 
-//     (chain, init)
-// }
+    (chain, init)
+}
 
 // /// Get the result of the view entrypoint.
 // fn invoke_view(chain: &mut Chain, contract_address: ContractAddress) -> ReturnBasicState {
@@ -791,40 +975,47 @@
 //     invoke.parse_return_value().expect("Return value")
 // }
 
-// /// Get the balances for Alice and Bob.
-// fn get_balances(
-//     chain: &Chain,
-//     contract_address: ContractAddress,
-// ) -> ContractBalanceOfQueryResponse {
-//     let balance_of_params = ContractBalanceOfQueryParams {
-//         queries: vec![
-//             BalanceOfQuery {
-//                 token_id: TOKEN_ID_WCCD,
-//                 address: ALICE_ADDR,
-//             },
-//             BalanceOfQuery {
-//                 token_id: TOKEN_ID_WCCD,
-//                 address: BOB_ADDR,
-//             },
-//         ],
-//     };
-//     let invoke = chain
-//         .contract_invoke(
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.balanceOf".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&balance_of_params).expect("BalanceOf params"),
-//             },
-//         )
-//         .expect("Invoke balanceOf");
-//     let rv: ContractBalanceOfQueryResponse =
-//         invoke.parse_return_value().expect("BalanceOf return value");
-//     rv
-// }
+struct Balances {
+    alice: Vec<(u64, SpendingRestriction)>,
+    bob: Vec<(u64, SpendingRestriction)>,
+}
+
+/// Get the balances for Alice and Bob.
+fn get_balances(chain: &Chain, contract_address: ContractAddress) -> Balances {
+    let invoke = chain
+        .contract_invoke(
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.view".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&ALICE_ADDR).expect("view params"),
+            },
+        )
+        .expect("Invoke view");
+    let alice_state: ViewState = invoke.parse_return_value().expect("View return value");
+
+    let invoke = chain
+        .contract_invoke(
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.view".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&BOB_ADDR).expect("view params"),
+            },
+        )
+        .expect("Invoke view");
+    let bob_state: ViewState = invoke.parse_return_value().expect("View return value");
+    Balances {
+        alice: alice_state.utxos,
+        bob: bob_state.utxos,
+    }
+}
 
 // /// Deserialize the events from an update.
 // fn deserialize_update_events(update: &ContractInvokeSuccess) -> Vec<WccdEvent> {

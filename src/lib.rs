@@ -210,13 +210,13 @@ pub struct StateTransitionParameter {
 
 #[receive(
     contract = "token",
-    name = "state_transition",
+    name = "transfer",
     parameter = "StateTransitionParameter",
     error = "ContractError",
     enable_logger,
     mutable
 )]
-fn state_transition(
+fn transfer(
     ctx: &ReceiveContext,
     host: &mut Host<State>,
     logger: &mut impl HasLogger,
@@ -629,13 +629,13 @@ type TransferParameter = TransferParams<ContractTokenId, ContractTokenAmount>;
 /// - Any of the receive hook function calls rejects.
 #[receive(
     contract = "token",
-    name = "transfer",
+    name = "old_transfer",
     parameter = "TransferParameter",
     error = "ContractError",
     enable_logger,
     mutable
 )]
-fn contract_transfer(
+fn old_transfer(
     ctx: &ReceiveContext,
     host: &mut Host<State>,
     logger: &mut impl HasLogger,
@@ -800,4 +800,39 @@ fn contract_operator_of(
     }
     let result = OperatorOfQueryResponse::from(response);
     Ok(result)
+}
+
+#[derive(Serialize, SchemaType, PartialEq, Eq, Debug)]
+pub struct ViewAddressState {
+    pub balances: Vec<(ContractTokenId, ContractTokenAmount)>,
+    pub operators: Vec<Address>,
+}
+
+#[derive(Serialize, SchemaType, PartialEq, Eq)]
+pub struct ViewState {
+    pub utxos: Vec<(u64, SpendingRestriction)>,
+    pub operators: Vec<Address>,
+}
+
+/// View function for testing. This reports on the entire UTXO state of an account.
+#[receive(
+    contract = "token",
+    name = "view",
+    parameter = "Address",
+    return_value = "ViewState"
+)]
+fn contract_view(ctx: &ReceiveContext, host: &Host<State>) -> ReceiveResult<ViewState> {
+    // Parse the parameter.
+    let address: Address = ctx.parameter_cursor().get()?;
+
+    let token_state = host.state().token.get(&address);
+
+    Ok(ViewState {
+        utxos: token_state.as_ref().map_or_else(Vec::new, |item| {
+            item.utxo_map.iter().map(|(k, v)| (*k, v.clone())).collect()
+        }),
+        operators: token_state
+            .as_ref()
+            .map_or_else(Vec::new, |item| item.operators.iter().map(|v| *v).collect()),
+    })
 }

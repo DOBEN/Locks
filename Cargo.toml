@@ -16,6 +16,8 @@ concordium-cis2 = {version="6.2.0", default-features = false}
 
 [dev-dependencies]
 concordium-smart-contract-testing = { version="4.3.0" }
+rand = "0.9.0"
+concordium-std-derive = "6.0.0"
 
 [lib]
 crate-type=["cdylib", "rlib"]
