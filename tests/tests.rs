@@ -66,23 +66,35 @@ fn test_account_transfer() {
         .expect("No restriction transfer tokens");
 
     // Check that Alice now has 99 tokens and Bob has 1 token.
+    let utxo_sets = get_utxo_sets(&chain, contract_address);
     let balances = get_balances(&chain, contract_address);
-    assert_eq!(
-        balances.alice,
-        [(1u64, SpendingRestriction::NoRestriction(99.into()))]
-    );
-    assert_eq!(
-        balances.bob,
-        [(2u64, SpendingRestriction::NoRestriction(1.into()))]
-    );
 
     let expected_utxo_created_alice = SpendingRestriction::NoRestriction(99.into());
     let expected_utxo_created_bob = SpendingRestriction::NoRestriction(1.into());
 
     let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
 
-    assert_eq!(balances.alice, [(1u64, expected_utxo_created_alice)]);
-    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
+    assert_eq!(utxo_sets.alice, [(1u64, expected_utxo_created_alice)]);
+    assert_eq!(utxo_sets.bob, [(2u64, expected_utxo_created_bob)]);
+    assert_eq!(
+        balances.alice,
+        TokenBalances {
+            total_balance: 99u64.into(),
+            at_disposal: 99u64.into(),
+            locked: 0u64.into()
+        }
+    );
+    assert_eq!(
+        balances.bob,
+        TokenBalances {
+            total_balance: 1u64.into(),
+            at_disposal: 1u64.into(),
+            locked: 0u64.into()
+        }
+    );
+
+    assert_eq!(utxo_sets.alice, [(1u64, expected_utxo_created_alice)]);
+    assert_eq!(utxo_sets.bob, [(2u64, expected_utxo_created_bob)]);
 
     // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
     let events = deserialize_update_events(&update);
@@ -170,7 +182,9 @@ fn test_account_scheduled_sender_lock_transfer() {
         .expect("Scheduled sender lock transfer tokens to succeed");
 
     // Check that Alice now has 99 tokens and Bob has 1 token.
+    let utxo_sets = get_utxo_sets(&chain, contract_address);
     let balances = get_balances(&chain, contract_address);
+
     let expected_utxo_created_alice_1 = SpendingRestriction::NoRestriction(99.into());
     let expected_utxo_created_alice_2 = SpendingRestriction::LockSender(ScheduleTransfer {
         amount: ContractTokenAmount::from(1u64),
@@ -183,13 +197,30 @@ fn test_account_scheduled_sender_lock_transfer() {
     let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
 
     assert_eq!(
-        balances.alice,
+        utxo_sets.alice,
         [
             (1u64, expected_utxo_created_alice_1),
             (2u64, expected_utxo_created_alice_2)
         ]
     );
-    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
+    assert_eq!(utxo_sets.bob, [(2u64, expected_utxo_created_bob)]);
+
+    assert_eq!(
+        balances.alice,
+        TokenBalances {
+            total_balance: 100u64.into(),
+            at_disposal: 99u64.into(),
+            locked: 1u64.into()
+        }
+    );
+    assert_eq!(
+        balances.bob,
+        TokenBalances {
+            total_balance: 0u64.into(),
+            at_disposal: 0u64.into(),
+            locked: 0u64.into()
+        }
+    );
 
     // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
     let events = deserialize_update_events(&update);
@@ -279,7 +310,9 @@ fn test_account_scheduled_receiver_lock_transfer() {
         .expect("Scheduled receiver lock transfer tokens to succeed");
 
     // Check that Alice now has 99 tokens and Bob has 1 token.
+    let utxo_sets = get_utxo_sets(&chain, contract_address);
     let balances = get_balances(&chain, contract_address);
+
     let expected_utxo_created_alice = SpendingRestriction::NoRestriction(99.into());
     let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
     let expected_utxo_created_bob = SpendingRestriction::ScheduleTransfer(ScheduleTransfer {
@@ -287,8 +320,25 @@ fn test_account_scheduled_receiver_lock_transfer() {
         release_time: Timestamp::from_timestamp_millis(1000),
     });
 
-    assert_eq!(balances.alice, [(1u64, expected_utxo_created_alice)]);
-    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
+    assert_eq!(utxo_sets.alice, [(1u64, expected_utxo_created_alice)]);
+    assert_eq!(utxo_sets.bob, [(2u64, expected_utxo_created_bob)]);
+
+    assert_eq!(
+        balances.alice,
+        TokenBalances {
+            total_balance: 99u64.into(),
+            at_disposal: 99u64.into(),
+            locked: 0u64.into()
+        }
+    );
+    assert_eq!(
+        balances.bob,
+        TokenBalances {
+            total_balance: 1u64.into(),
+            at_disposal: 0u64.into(),
+            locked: 1u64.into()
+        }
+    );
 
     // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
     let events = deserialize_update_events(&update);
@@ -328,185 +378,6 @@ fn test_account_scheduled_receiver_lock_transfer() {
         ]
     );
 }
-
-// /// Test that init produces the correct logs.
-// #[test]
-// fn test_init() {
-//     let (_chain, init) = initialize_chain_and_contract();
-//     // Check that the logs are correct.
-
-//     let events = init
-//         .events
-//         .iter()
-//         .map(|e| e.parse().expect("Parsing WccdEvent."))
-//         .collect::<Vec<WccdEvent>>();
-
-//     assert_eq!(
-//         events,
-//         [
-//             WccdEvent::Cis2Event(Cis2Event::Mint(MintEvent {
-//                 token_id: TOKEN_ID_WCCD,
-//                 amount: ContractTokenAmount::from(0u64),
-//                 owner: ALICE_ADDR,
-//             })),
-//             WccdEvent::Cis2Event(Cis2Event::TokenMetadata(TokenMetadataEvent {
-//                 token_id: TOKEN_ID_WCCD,
-//                 metadata_url: MetadataUrl {
-//                     url: METADATA_URL.to_string(),
-//                     hash: None,
-//                 },
-//             })),
-//             WccdEvent::NewAdmin {
-//                 new_admin: NewAdminEvent {
-//                     new_admin: ALICE_ADDR,
-//                 },
-//             }
-//         ]
-//     );
-// }
-
-/// Test that only the admin can set the metadata URL.
-// #[test]
-// fn transfer_tokens() {
-//     let (mut chain, contract_address, _) = initialize_contract_with_alice_tokens();
-
-//     let new_metadata_url = "https://new-url.com".to_string();
-//
-// // Construct the parameters.
-// let params = SetMetadataUrlParams {
-//     url: new_metadata_url.clone(),
-//     hash: None,
-// };
-
-// // Try to set the metadata URL from Bob's account, who is not the admin.
-// let update = chain
-//     .contract_update(
-//         SIGNER,
-//         BOB,
-//         BOB_ADDR,
-//         Energy::from(10000),
-//         UpdateContractPayload {
-//             amount: Amount::zero(),
-//             receive_name: OwnedReceiveName::new_unchecked(
-//                 "cis2_wCCD.setMetadataUrl".to_string(),
-//             ),
-//             address: contract_address,
-//             message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
-//         },
-//     )
-//     .expect_err("SetMetadataUrl");
-
-// // Check that the return value is correct.
-// let rv: ContractError = update.parse_return_value().expect("Parsing ContractError");
-// assert_eq!(rv, ContractError::Unauthorized);
-
-// // Set the metadata URL from Alice's account, who is the admin.
-// let update = chain
-//     .contract_update(
-//         SIGNER,
-//         ALICE,
-//         ALICE_ADDR,
-//         Energy::from(10000),
-//         UpdateContractPayload {
-//             amount: Amount::zero(),
-//             receive_name: OwnedReceiveName::new_unchecked(
-//                 "cis2_wCCD.setMetadataUrl".to_string(),
-//             ),
-//             address: contract_address,
-//             message: OwnedParameter::from_serial(&params).expect("SetMetadataUrl params"),
-//         },
-//     )
-//     .expect("SetMetadataUrl");
-
-// // Check that the logs are correct.
-// let events = deserialize_update_events(&update);
-
-// assert_eq!(
-//     events,
-//     [WccdEvent::Cis2Event(Cis2Event::TokenMetadata(
-//         TokenMetadataEvent {
-//             token_id: TOKEN_ID_WCCD,
-//             metadata_url: MetadataUrl {
-//                 url: new_metadata_url,
-//                 hash: None,
-//             },
-//         }
-//     )),]
-// );
-// }
-
-// /// Test that you can add an operator.
-// /// Initialize the contract with one token owned by Alice.
-// /// Then add Bob as an operator for Alice.
-// #[test]
-// fn test_add_operator() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Add Bob as an operator for Alice.
-//     let params = UpdateOperatorParams(vec![UpdateOperator {
-//         update: OperatorUpdate::Add,
-//         operator: BOB_ADDR,
-//     }]);
-
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked(
-//                     "cis2_wCCD.updateOperator".to_string(),
-//                 ),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("UpdateOperator params"),
-//             },
-//         )
-//         .expect("Update operator");
-
-//     // Check that an operator event occurred.
-//     let events = deserialize_update_events(&update);
-//     assert_eq!(
-//         events,
-//         [WccdEvent::Cis2Event(Cis2Event::UpdateOperator(
-//             UpdateOperatorEvent {
-//                 operator: BOB_ADDR,
-//                 owner: ALICE_ADDR,
-//                 update: OperatorUpdate::Add,
-//             }
-//         )),]
-//     );
-
-//     // Construct a query parameter to check whether Bob is an operator for Alice.
-//     let query_params = OperatorOfQueryParams {
-//         queries: vec![OperatorOfQuery {
-//             owner: ALICE_ADDR,
-//             address: BOB_ADDR,
-//         }],
-//     };
-
-//     // Invoke the operatorOf view entrypoint and check that Bob is an operator for
-//     // Alice.
-//     let invoke = chain
-//         .contract_invoke(
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.operatorOf".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&query_params).expect("OperatorOf params"),
-//             },
-//         )
-//         .expect("Invoke view");
-
-//     let rv: OperatorOfQueryResponse = invoke
-//         .parse_return_value()
-//         .expect("OperatorOf return value");
-//     assert_eq!(rv, OperatorOfQueryResponse(vec![true]));
-// }
 
 // /// Test that a transfer fails when the sender is neither an operator or the
 // /// owner. In particular, Bob will attempt to transfer some of Alice's tokens to
@@ -604,365 +475,7 @@ fn test_account_scheduled_receiver_lock_transfer() {
 //     assert_eq!(balances.0, [99.into(), 1.into()]);
 // }
 
-// /// Test wrap and unwrap functions.
-// #[test]
-// fn test_wrap_unwrap() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Wrap 100 microCCD into wCCD for Bob.
-//     let wrap_params = WrapParams {
-//         to: Receiver::Account(BOB),
-//         data: AdditionalData::empty(),
-//     };
-//     chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::from_micro_ccd(100),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.wrap".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&wrap_params).expect("Wrap params"),
-//             },
-//         )
-//         .expect("Wrap CCD");
-//     // Check that Bob now has 100 wCCD. Alice also has 100wCCD.
-//     let balances = get_balances(&chain, contract_address);
-//     assert_eq!(balances.0, [100.into(), 100.into()]);
-
-//     // Unwrap 100 wCCD for Bob.
-//     let unwrap_params = UnwrapParams {
-//         amount: 100.into(),
-//         owner: BOB_ADDR,
-//         receiver: Receiver::Account(BOB),
-//         data: AdditionalData::empty(),
-//     };
-//     let update_unwrap = chain
-//         .contract_update(
-//             SIGNER,
-//             BOB,
-//             BOB_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.unwrap".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&unwrap_params).expect("Unwrap params"),
-//             },
-//         )
-//         .expect("Unwrap wCCD");
-//     // Check that Bob now has 0 wCCD. Alice still has 100 wCCD.
-//     let balances = get_balances(&chain, contract_address);
-//     assert_eq!(balances.0, [100.into(), 0.into()]);
-
-//     // Also check that the burn event is produced.
-//     let events = deserialize_update_events(&update_unwrap);
-//     assert_eq!(
-//         events,
-//         [WccdEvent::Cis2Event(Cis2Event::Burn(BurnEvent {
-//             token_id: TOKEN_ID_WCCD,
-//             amount: 100.into(),
-//             owner: BOB_ADDR,
-//         })),]
-//     );
-// }
-
-// /// Test unwrapping to a missing account.
-// #[test]
-// fn test_unwrap_to_missing_account() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Unwrap 100 wCCD for Bob.
-//     let unwrap_params = UnwrapParams {
-//         amount: 100.into(),
-//         owner: ALICE_ADDR,
-//         receiver: Receiver::Account(CHARLIE), // The Charlie account has not been created.
-//         data: AdditionalData::empty(),
-//     };
-//     let update_unwrap = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.unwrap".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&unwrap_params).expect("Unwrap params"),
-//             },
-//         )
-//         .expect_err("Unwrap wCCD");
-
-//     // Check that the correct error is returned.
-//     let rv: ContractError = update_unwrap
-//         .parse_return_value()
-//         .expect("ContractError return value");
-//     assert_eq!(
-//         rv,
-//         ContractError::Custom(CustomContractError::InvokeTransferError)
-//     );
-// }
-
-// /// Test that you can update the admin account.
-// #[test]
-// fn test_update_admin() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Update the admin account to Bob.
-//     let params = BOB_ADDR;
-
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.updateAdmin".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("UpdateAdmin params"),
-//             },
-//         )
-//         .expect("Update admin");
-
-//     // Invoke the view function to check that the new admin is Bob.
-//     assert_eq!(invoke_view(&mut chain, contract_address).admin, BOB_ADDR);
-
-//     // Check that the logs are correct.
-//     let events = deserialize_update_events(&update);
-//     assert_eq!(
-//         events,
-//         [WccdEvent::NewAdmin {
-//             new_admin: NewAdminEvent {
-//                 new_admin: BOB_ADDR,
-//             },
-//         },]
-//     );
-// }
-
-// /// Test that only the current admin can update the admin account.
-// #[test]
-// fn test_update_admin_unauthorized() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Update the admin account to Bob.
-//     let params = BOB_ADDR;
-
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             BOB,
-//             BOB_ADDR, // Bob is not the admin.
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.updateAdmin".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("UpdateAdmin params"),
-//             },
-//         )
-//         .expect_err("Update admin");
-
-//     // Check that the correct error is returned.
-//     let rv: ContractError = update
-//         .parse_return_value()
-//         .expect("ContractError return value");
-//     assert_eq!(rv, ContractError::Unauthorized);
-// }
-
-// /// Test that the pause/unpause entrypoints correctly sets the pause value in
-// /// the state.
-// #[test]
-// fn test_pause_functionality() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Pause the contract.
-//     chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.setPaused".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&true).expect("Pause params"),
-//             },
-//         )
-//         .expect("Pause");
-
-//     // Check that the contract is now paused.
-//     assert_eq!(invoke_view(&mut chain, contract_address).paused, true);
-
-//     // Unpause the contract.
-//     chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.setPaused".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&false).expect("Unpause params"),
-//             },
-//         )
-//         .expect("Unpause");
-//     // Check that the contract is now unpaused.
-//     assert_eq!(invoke_view(&mut chain, contract_address).paused, false);
-// }
-
-// /// Test that only the admin can pause/unpause the contract.
-// #[test]
-// fn test_pause_unpause_unauthorized() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Pause the contract as Bob, who is not the admin.
-//     let update = chain
-//         .contract_update(
-//             SIGNER,
-//             BOB,
-//             BOB_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.setPaused".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&true).expect("Pause params"),
-//             },
-//         )
-//         .expect_err("Pause");
-
-//     // Check that the correct error is returned.
-//     let rv: ContractError = update
-//         .parse_return_value()
-//         .expect("ContractError return value");
-//     assert_eq!(rv, ContractError::Unauthorized);
-// }
-
-// /// Test that one can NOT call non-admin state-mutative functions (wrap,
-// /// unwrap, transfer, updateOperator) when the contract is paused.
-// #[test]
-// fn test_no_execution_of_state_mutative_functions_when_paused() {
-//     let (mut chain, contract_address, _update) = initialize_contract_with_alice_tokens();
-
-//     // Pause the contract.
-//     chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.setPaused".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&true).expect("Pause params"),
-//             },
-//         )
-//         .expect("Pause");
-
-//     // Try to wrap 100 microCCD into wCCD for Bob.
-//     let wrap_params = WrapParams {
-//         to: Receiver::Account(BOB),
-//         data: AdditionalData::empty(),
-//     };
-//     let update_wrap = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::from_micro_ccd(100),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.wrap".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&wrap_params).expect("Wrap params"),
-//             },
-//         )
-//         .expect_err("Wrap CCD");
-
-//     // Check that the correct error is returned.
-//     assert_contract_paused_error(&update_wrap);
-
-//     // Try to unwrap 1 wCCD for Alice.
-//     let unwrap_params = UnwrapParams {
-//         amount: 1.into(),
-//         owner: ALICE_ADDR,
-//         receiver: Receiver::Account(ALICE),
-//         data: AdditionalData::empty(),
-//     };
-//     let update_unwrap = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.unwrap".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&unwrap_params).expect("Unwrap params"),
-//             },
-//         )
-//         .expect_err("Unwrap wCCD");
-//     assert_contract_paused_error(&update_unwrap);
-
-//     // Try to transfer 1 wCCD from Alice to Bob.
-//     let transfer_params = TransferParams::from(vec![concordium_cis2::Transfer {
-//         from: ALICE_ADDR,
-//         to: Receiver::Account(BOB),
-//         token_id: TOKEN_ID_WCCD,
-//         amount: TokenAmountU64(1),
-//         data: AdditionalData::empty(),
-//     }]);
-//     let update_transfer = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.transfer".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&transfer_params).expect("Transfer params"),
-//             },
-//         )
-//         .expect_err("Transfer tokens");
-//     assert_contract_paused_error(&update_transfer);
-
-//     // Try to add Bob as an operator for Alice.
-//     let params = UpdateOperatorParams(vec![UpdateOperator {
-//         update: OperatorUpdate::Add,
-//         operator: BOB_ADDR,
-//     }]);
-//     let update_operator = chain
-//         .contract_update(
-//             SIGNER,
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked(
-//                     "cis2_wCCD.updateOperator".to_string(),
-//                 ),
-//                 address: contract_address,
-//                 message: OwnedParameter::from_serial(&params).expect("UpdateOperator params"),
-//             },
-//         )
-//         .expect_err("Update operator");
-//     assert_contract_paused_error(&update_operator);
-// }
-
-// // Helpers:
+// Helpers:
 
 /// Helper function that initializes the contract and mint 100 tokens to Alice.
 fn initialize_contract_with_alice_tokens() -> (Chain, ContractAddress, ContractInvokeSuccess) {
@@ -1034,31 +547,18 @@ fn initialize_chain_and_contract() -> (Chain, ContractInitSuccess) {
     (chain, init)
 }
 
-// /// Get the result of the view entrypoint.
-// fn invoke_view(chain: &mut Chain, contract_address: ContractAddress) -> ReturnBasicState {
-//     let invoke = chain
-//         .contract_invoke(
-//             ALICE,
-//             ALICE_ADDR,
-//             Energy::from(10000),
-//             UpdateContractPayload {
-//                 amount: Amount::zero(),
-//                 receive_name: OwnedReceiveName::new_unchecked("cis2_wCCD.view".to_string()),
-//                 address: contract_address,
-//                 message: OwnedParameter::empty(),
-//             },
-//         )
-//         .expect("Invoke view");
-//     invoke.parse_return_value().expect("Return value")
-// }
-
-struct Balances {
+struct AliceAndBobUTXOSets {
     alice: Vec<(u64, SpendingRestriction)>,
     bob: Vec<(u64, SpendingRestriction)>,
 }
 
-/// Get the balances for Alice and Bob.
-fn get_balances(chain: &Chain, contract_address: ContractAddress) -> Balances {
+struct AliceAndBobTokenBalances {
+    alice: TokenBalances,
+    bob: TokenBalances,
+}
+
+/// Get the utxo sets for Alice and Bob.
+fn get_utxo_sets(chain: &Chain, contract_address: ContractAddress) -> AliceAndBobUTXOSets {
     let invoke = chain
         .contract_invoke(
             ALICE,
@@ -1088,9 +588,45 @@ fn get_balances(chain: &Chain, contract_address: ContractAddress) -> Balances {
         )
         .expect("Invoke view");
     let bob_state: ViewState = invoke.parse_return_value().expect("View return value");
-    Balances {
+    AliceAndBobUTXOSets {
         alice: alice_state.utxos,
         bob: bob_state.utxos,
+    }
+}
+
+/// Get the balances for Alice and Bob.
+fn get_balances(chain: &Chain, contract_address: ContractAddress) -> AliceAndBobTokenBalances {
+    let param = ContractBalanceOfQueryParams {
+        queries: vec![
+            BalanceOfQuery {
+                address: ALICE_ADDR,
+                token_id: TOKEN_ID,
+            },
+            BalanceOfQuery {
+                address: BOB_ADDR,
+                token_id: TOKEN_ID,
+            },
+        ],
+    };
+
+    let invoke = chain
+        .contract_invoke(
+            ALICE,
+            ALICE_ADDR,
+            Energy::from(10000),
+            UpdateContractPayload {
+                amount: Amount::zero(),
+                receive_name: OwnedReceiveName::new_unchecked("token.balanceOf".to_string()),
+                address: contract_address,
+                message: OwnedParameter::from_serial(&param).expect("BalanceOf params"),
+            },
+        )
+        .expect("Invoke balanceOf");
+    let state: Vec<TokenBalances> = invoke.parse_return_value().expect("BalanceOf return value");
+
+    AliceAndBobTokenBalances {
+        alice: state[0].clone(),
+        bob: state[1].clone(),
     }
 }
 
@@ -1101,14 +637,3 @@ fn deserialize_update_events(update: &ContractInvokeSuccess) -> Vec<TokenEvent> 
         .flat_map(|(_addr, events)| events.iter().map(|e| e.parse().expect("Deserialize event")))
         .collect()
 }
-
-// /// Check that the returned error is `ContractPaused`.
-// fn assert_contract_paused_error(update: &ContractInvokeError) {
-//     let rv: ContractError = update
-//         .parse_return_value()
-//         .expect("ContractError return value");
-//     assert_eq!(
-//         rv,
-//         ContractError::Custom(CustomContractError::ContractPaused)
-//     );
-// }

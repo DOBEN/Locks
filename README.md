@@ -31,7 +31,7 @@ For example: Timelock is 5 hours, amount transferred is 1 token, Alice's token b
 | **Bob Token Balance (locked)**    | 1                                                                       | 0                                |
 
 
-## Schedule transfer Definition
+## Lock Definition
 
 A `lock` is the operation when Alice transfers tokens to Bob with a time lock and the following release behavior:
 The balance is accounted for on Alice's balance but locked (meaning Alice has the funds not at her disposal) and when

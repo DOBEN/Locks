@@ -17,7 +17,7 @@
 //! Bob Token Balance (locked)        | 1                                                                       | 0
 //!
 //!
-//! # Schedule transfer Definition
+//! # Lock Definition
 //!
 //! A `lock` is the operation when Alice transfers tokens to Bob with a time lock and the following release behavior:
 //! The balance is accounted for on Alice's balance but locked (meaning Alice has the funds not at her disposal) and when
@@ -771,25 +771,31 @@ impl State {
             for (_, spending_restriction) in address_state.utxo_map.iter() {
                 let amount = spending_restriction.amount();
 
-                if let Some(release_time) = spending_restriction.release_time() {
-                    if release_time >= slot_time {
-                        locked += amount;
-                    } else {
+                match *spending_restriction {
+                    SpendingRestriction::NoRestriction(_) => {
                         disposal += amount;
-                    }
-                    total += amount;
-                }
-
-                if let Some(remove_time) = spending_restriction.remove_time() {
-                    if remove_time < slot_time {
-                        locked += amount;
                         total += amount;
                     }
-                }
-
-                if let SpendingRestriction::NoRestriction(_) = *spending_restriction {
-                    disposal += amount;
-                    total += amount;
+                    SpendingRestriction::LockRecipient(lock) => {
+                        if lock.release_time < slot_time {
+                            disposal += amount;
+                            total += amount;
+                        }
+                    }
+                    SpendingRestriction::LockSender(lock) => {
+                        if lock.release_time >= slot_time {
+                            locked += amount;
+                            total += amount;
+                        }
+                    }
+                    SpendingRestriction::ScheduleTransfer(lock) => {
+                        if lock.release_time >= slot_time {
+                            locked += amount;
+                        } else {
+                            disposal += amount;
+                        }
+                        total += amount;
+                    }
                 }
             }
 
@@ -1002,7 +1008,7 @@ fn contract_update_operator(
 pub type ContractBalanceOfQueryParams = BalanceOfQueryParams<ContractTokenId>;
 
 /// Return parameter type for the CIS-2 like function `balanceOf` .
-#[derive(Serialize, SchemaType, Debug)]
+#[derive(Serialize, SchemaType, Debug, Clone, PartialEq, Eq)]
 pub struct TokenBalances {
     pub total_balance: ContractTokenAmount,
     pub at_disposal: ContractTokenAmount,
