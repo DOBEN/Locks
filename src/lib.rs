@@ -62,10 +62,6 @@ use concordium_std::{collections::BTreeMap, *};
 /// The id of the token in this contract.
 pub const TOKEN_ID: ContractTokenId = TokenIdUnit();
 
-/// List of supported standards by this contract address.
-pub const SUPPORTS_STANDARDS: [StandardIdentifier<'static>; 2] =
-    [CIS0_STANDARD_IDENTIFIER, CIS2_STANDARD_IDENTIFIER];
-
 /// Sha256 digest
 pub type Sha256 = [u8; 32];
 
@@ -128,7 +124,7 @@ pub struct CreatedUTXOEvent {
 }
 
 // Implementing a custom schemaType for the `TokenEvent` struct containing all
-// CIS2 events and custom events of this token contract. This custom implementation flattens the fields to avoid one
+// CIS2 like events and custom events of this token contract. This custom implementation flattens the fields to avoid one
 // level of nesting. Deriving the schemaType would result in e.g.: {"Nonce":
 // [{...fields}] }. In contrast, this custom schemaType implementation results
 // in e.g.: {"Nonce": {...fields} }
@@ -161,7 +157,7 @@ impl schema::SchemaType for TokenEvent {
             ),
         );
 
-        // CIS2 events:
+        // CIS2 like events:
         event_map.insert(
             TRANSFER_EVENT_TAG,
             (
@@ -280,14 +276,17 @@ pub struct UTXO {
     pub spending_restriction: SpendingRestriction,
 }
 
+#[derive(Serialize, SchemaType, Debug)]
+pub struct LockConnection {
+    pub from: Address,
+    pub to: Address,
+    pub transfer_event_emitted: bool,
+}
+
 /// The state tracked for each address.
 #[derive(Serial, DeserialWithState, Deletable)]
 #[concordium(state_parameter = "S")]
 pub struct AddressState<S = StateApi> {
-    // TODO?
-    /// The number of tokens owned by this address (locked + scheduled + notRestrictedBalance).
-    // pub total_balance: ContractTokenAmount,
-
     /// Set of UTXOs that above balance is divided into.
     pub utxo_map: StateMap<u64, SpendingRestriction, S>,
     /// The address which are currently enabled as operators for this token and
@@ -303,6 +302,8 @@ struct State<S: HasStateApi = StateApi> {
     token_metadata: StateBox<MetadataUrl, S>,
     /// A sequential counter that assigns each newly created UTXO a unique index.
     utxo_counter: u64,
+    ///
+    lock_connection: StateMap<u64, LockConnection, S>,
     /// All tokens in the contract.
     token: StateMap<Address, AddressState<S>, S>,
 }
@@ -357,6 +358,101 @@ pub struct StateTransitionParameter {
     pub out_utxos: Vec<UTXOToCreate>,
 }
 
+// Vector of `utxo_indexes` associated to old lock UTXOs that should have their transfer event emitted now.
+// This entrypoint should be called regularly by a backend to `emit` the associated transfer events at the time that the lock is released.
+// This simulates a process in the node where this part will be automated.
+// The `TransferEvents` have the same format as `CIS2 Tokens` currently, which requires this `clean-up`/`emittingEvents` function at the
+// time the lock is released. If keeping the same format for the `TransferEvents` as `CIS2 Tokens` is not so relevant, emitting
+// the `TransferEvents` at the time the UTXOs are created with an addional field for the `release_time` that the transfer will happen might be preferable
+// instead of this function/mechanism.
+#[receive(
+    contract = "token",
+    name = "emitLockTransferEvent",
+    parameter = "Vec<u64>",
+    error = "ContractError",
+    enable_logger,
+    mutable
+)]
+fn emit_lock_transfer_event(
+    ctx: &ReceiveContext,
+    host: &mut Host<State>,
+    logger: &mut impl HasLogger,
+) -> ContractResult<()> {
+    // Parse the parameter.
+    let params: Vec<u64> = ctx.parameter_cursor().get()?;
+
+    emit_lock_transfer_event_internal(params, ctx, host, logger)?;
+
+    Ok(())
+}
+
+fn emit_lock_transfer_event_internal(
+    vec_utxo_indexes: Vec<u64>,
+    ctx: &ReceiveContext,
+    host: &mut Host<State>,
+    logger: &mut impl HasLogger,
+) -> ContractResult<()> {
+    for utxo_index in vec_utxo_indexes {
+        // Check that we haven't emitted the event yet, and update flag.
+        let Some(mut lock_connection) = host.state.lock_connection.get_mut(&utxo_index) else {
+            return Err(ContractError::Custom(CustomContractError::LogRestriction));
+        };
+
+        ensure!(
+            !lock_connection.transfer_event_emitted,
+            ContractError::Custom(CustomContractError::LogRestriction)
+        );
+        lock_connection.transfer_event_emitted = true;
+
+        let from_lock = host
+            .state
+            .token
+            .get(&lock_connection.from)
+            .and_then(|address_state| {
+                address_state
+                    .utxo_map
+                    .get(&utxo_index)
+                    .and_then(|utxo_state| match *utxo_state {
+                        SpendingRestriction::LockSender(lock) => Some(lock),
+                        _ => None,
+                    })
+            });
+
+        let to_lock = host
+            .state
+            .token
+            .get(&lock_connection.from)
+            .and_then(|address_state| {
+                address_state
+                    .utxo_map
+                    .get(&utxo_index)
+                    .and_then(|utxo_state| match *utxo_state {
+                        SpendingRestriction::LockSender(lock) => Some(lock),
+                        _ => None,
+                    })
+            });
+
+        if let (Some(_), Some(to_lock)) = (from_lock, to_lock) {
+            // Check that log is released by now.
+            ensure!(
+                to_lock.release_time < ctx.metadata().slot_time(),
+                ContractError::Custom(CustomContractError::LogRestriction)
+            );
+            // Log outstanding CIS2 transfer event (lock case)
+            logger.log(&TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: to_lock.amount,
+                from: lock_connection.from,
+                to: lock_connection.to,
+            })))?;
+        } else {
+            return Err(ContractError::Custom(CustomContractError::LogRestriction));
+        }
+    }
+
+    Ok(())
+}
+
 #[receive(
     contract = "token",
     name = "transfer",
@@ -372,17 +468,32 @@ fn transfer(
 ) -> ContractResult<()> {
     // Get the sender who invoked this contract function.
     let sender = ctx.sender();
-    let (state, state_builder) = host.state_and_builder();
     // Parse the parameter.
     let params: StateTransitionParameter = ctx.parameter_cursor().get()?;
 
     let mut sum_amounts_in_utxos = TokenAmountU64::default();
     let mut sum_amounts_out_utxos = TokenAmountU64::default();
 
+    // Check if we still need to emit the `transferEvent` for old locks.
+    let utxo_indexes = params
+        .in_utxos
+        .clone()
+        .into_iter()
+        .filter_map(|x| {
+            if let SpendingRestriction::LockSender(_) = x.spending_restriction {
+                Some(x.utxo_index)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    emit_lock_transfer_event_internal(utxo_indexes, ctx, host, logger)?;
+
+    let (state, state_builder) = host.state_and_builder();
     {
         let mut sender_token_state = state.token.entry(sender).or_insert_with(|| AddressState {
             utxo_map: state_builder.new_map(),
-            // total_balance: 0u64.into(),
             operators: state_builder.new_set(),
         });
 
@@ -448,7 +559,6 @@ fn transfer(
                         .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
-                            // total_balance:amount,
                             operators: state_builder.new_set(),
                         });
                 _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
@@ -473,7 +583,7 @@ fn transfer(
                 // Update of the sender's state
                 {
                     let utxo_index = state.utxo_counter;
-                    let utxo = SpendingRestriction::LockSender(schedule_transfer.clone());
+                    let utxo = SpendingRestriction::LockSender(schedule_transfer);
 
                     let mut sender_token_state = state
                         .token
@@ -502,7 +612,6 @@ fn transfer(
                         .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
-                            // total_balance: 0u64.into(),
                             operators: state_builder.new_set(),
                         });
                 _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
@@ -515,13 +624,21 @@ fn transfer(
                     at: recipient,
                 }))?;
 
-                // Log CIS2 transfer event
-                logger.log(&TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
-                    token_id: TOKEN_ID,
-                    amount: schedule_transfer.amount,
-                    from: sender,
-                    to: recipient,
-                })))?;
+                // Emitting the `CIS2 transfer event` is postponed in the `lock` case (see comment at function `emitLockTransferEvent`).
+                // We track the `lock_connection` in the state which will be used
+                // by the `emitLockTransferEvent` function.
+                let old_entry = state.lock_connection.insert(
+                    utxo_index,
+                    LockConnection {
+                        from: sender,
+                        to: recipient,
+                        transfer_event_emitted: false,
+                    },
+                );
+                ensure!(
+                    old_entry.is_none(),
+                    ContractError::Custom(CustomContractError::LockConnectionAlreadyExists)
+                );
             }
             SpendingRestrictionToCreate::ScheduleTransfer(schedule_transfer) => {
                 let utxo_index = state.utxo_counter;
@@ -534,7 +651,6 @@ fn transfer(
                         .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
-                            // total_balance: 0u64.into(),
                             operators: state_builder.new_set(),
                         });
                 _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
@@ -584,17 +700,19 @@ pub struct SetMetadataUrlParams {
 pub enum CustomContractError {
     /// Failed parsing the parameter.
     #[from(ParseError)]
-    ParseParams,
+    ParseParams, // -1
     /// Failed logging: Log is full.
-    LogFull,
+    LogFull, // -2
     /// Failed logging: Log is malformed.
-    LogMalformed,
+    LogMalformed, // -3
     /// Failed to invoke a contract.
-    InvokeContractError,
+    InvokeContractError, // -4
     /// Failed to invoke a transfer.
-    InvokeTransferError,
-    MismatchOfUTXOSums,
-    SpendingRestriction,
+    InvokeTransferError, // -5
+    MismatchOfUTXOSums,          // -6
+    SpendingRestriction,         // -7
+    LogRestriction,              // -8
+    LockConnectionAlreadyExists, // -9
 }
 
 pub type ContractError = Cis2Error<CustomContractError>;
@@ -639,18 +757,46 @@ impl State {
             utxo_counter: 0u64,
             token: state_builder.new_map(),
             token_metadata: state_builder.new_box(metadata_url),
+            lock_connection: state_builder.new_map(),
         }
     }
 
-    // TODO
     /// Get the current balance of a given token id for a given address.
-    fn balance(&self, address: &Address) -> ContractResult<ContractTokenAmount> {
-        Ok(0u64.into())
-        // Ok(self
-        //     .token
-        //     .get(address)
-        //     .map(|s| s.total_balance)
-        //     .unwrap_or_else(|| 0u64.into()))
+    fn balance(&self, address: &Address, slot_time: Timestamp) -> ContractResult<TokenBalances> {
+        if let Some(address_state) = self.token.get(address) {
+            let mut total: ContractTokenAmount = 0u64.into();
+            let mut disposal: ContractTokenAmount = 0u64.into();
+            let mut locked: ContractTokenAmount = 0u64.into();
+
+            for (_, spending_restriction) in address_state.utxo_map.iter() {
+                let amount = spending_restriction.amount();
+
+                if let Some(release_time) = spending_restriction.release_time() {
+                    if release_time >= slot_time {
+                        locked += amount;
+                    } else {
+                        disposal += amount;
+                    }
+                    total += amount;
+                }
+
+                if let Some(remove_time) = spending_restriction.remove_time() {
+                    if remove_time < slot_time {
+                        locked += amount;
+                        total += amount;
+                    }
+                }
+
+                if let SpendingRestriction::NoRestriction(_) = *spending_restriction {
+                    disposal += amount;
+                    total += amount;
+                }
+            }
+
+            Ok(TokenBalances::new_with_values(total, disposal, locked))
+        } else {
+            Ok(TokenBalances::new())
+        }
     }
 
     /// Check if an address is an operator of a specific owner address.
@@ -671,7 +817,6 @@ impl State {
     ) {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             utxo_map: state_builder.new_map(),
-            // total_balance: 0u64.into(),
             operators: state_builder.new_set(),
         });
         owner_state.operators.insert(*operator);
@@ -694,11 +839,9 @@ impl State {
     ) -> ContractResult<()> {
         let mut owner_state = self.token.entry(*owner).or_insert_with(|| AddressState {
             utxo_map: state_builder.new_map(),
-            // total_balance: amount.into(),
             operators: state_builder.new_set(),
         });
 
-        // owner_state.total_balance += amount;
         _ = owner_state.utxo_map.insert(
             self.utxo_counter,
             SpendingRestriction::NoRestriction(amount),
@@ -756,6 +899,8 @@ fn contract_init(
 /// It rejects if:
 /// - Fails to parse parameter.
 /// - Fails to log Mint event.
+///
+/// TODO: Add logic to also create `schedule_transfers/locks` instead of only `NoRestriction` UTXOs.
 #[receive(
     contract = "token",
     name = "mint",
@@ -852,13 +997,44 @@ fn contract_update_operator(
     Ok(())
 }
 
-/// Parameter type for the CIS-2 function `balanceOf` specialized to the subset
+/// Parameter type for the CIS-2 like function `balanceOf` specialized to the subset
 /// of TokenIDs used by this contract.
 pub type ContractBalanceOfQueryParams = BalanceOfQueryParams<ContractTokenId>;
 
-pub type ContractBalanceOfQueryResponse = BalanceOfQueryResponse<ContractTokenAmount>;
+/// Return parameter type for the CIS-2 like function `balanceOf` .
+#[derive(Serialize, SchemaType, Debug)]
+pub struct TokenBalances {
+    pub total_balance: ContractTokenAmount,
+    pub at_disposal: ContractTokenAmount,
+    pub locked: ContractTokenAmount,
+}
 
-/// Get the balance of given token IDs and addresses.
+impl TokenBalances {
+    fn new() -> Self {
+        TokenBalances {
+            total_balance: 0u64.into(),
+            at_disposal: 0u64.into(),
+            locked: 0u64.into(),
+        }
+    }
+
+    fn new_with_values(
+        total_balance: ContractTokenAmount,
+        at_disposal: ContractTokenAmount,
+        locked: ContractTokenAmount,
+    ) -> Self {
+        TokenBalances {
+            total_balance,
+            at_disposal,
+            locked,
+        }
+    }
+}
+
+/// View function for testing. This function potentially goes through a long array of UTXOs.
+/// The recommended way would be track the UTXO set off-chain and provided a `balanceOf` function
+/// off-chain instead of this on-chain function.
+/// Get the balance (total, at_disposal, and locked balances) of given token IDs and addresses.
 ///
 /// It rejects if:
 /// - It fails to parse the parameter.
@@ -867,13 +1043,13 @@ pub type ContractBalanceOfQueryResponse = BalanceOfQueryResponse<ContractTokenAm
     contract = "token",
     name = "balanceOf",
     parameter = "ContractBalanceOfQueryParams",
-    return_value = "ContractBalanceOfQueryResponse",
+    return_value = "Vec<TokenBalances>",
     error = "ContractError"
 )]
 fn contract_balance_of(
     ctx: &ReceiveContext,
     host: &Host<State>,
-) -> ContractResult<ContractBalanceOfQueryResponse> {
+) -> ContractResult<Vec<TokenBalances>> {
     // Parse the parameter.
     let params: ContractBalanceOfQueryParams = ctx.parameter_cursor().get()?;
 
@@ -883,11 +1059,12 @@ fn contract_balance_of(
         ensure_eq!(query.token_id, TOKEN_ID, ContractError::InvalidTokenId);
 
         // Query the state for balance.
-        let amount = host.state().balance(&query.address)?;
-        response.push(amount);
+        let balances = host
+            .state()
+            .balance(&query.address, ctx.metadata().slot_time())?;
+        response.push(balances);
     }
-    let result = ContractBalanceOfQueryResponse::from(response);
-    Ok(result)
+    Ok(response)
 }
 
 /// Takes a list of queries. Each query contains an owner address and some
@@ -946,7 +1123,7 @@ fn contract_view(ctx: &ReceiveContext, host: &Host<State>) -> ReceiveResult<View
 
     Ok(ViewState {
         utxos: token_state.as_ref().map_or_else(Vec::new, |item| {
-            item.utxo_map.iter().map(|(k, v)| (*k, v.clone())).collect()
+            item.utxo_map.iter().map(|(k, v)| (*k, *v)).collect()
         }),
         operators: token_state
             .as_ref()

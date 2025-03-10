@@ -76,17 +76,51 @@ fn test_account_transfer() {
         [(2u64, SpendingRestriction::NoRestriction(1.into()))]
     );
 
-    // // Check that a single transfer event occurred.
-    // let events = deserialize_update_events(&update);
-    // assert_eq!(
-    //     events,
-    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
-    //         token_id: TOKEN_ID_WCCD,
-    //         amount: TokenAmountU64(1),
-    //         from: ALICE_ADDR,
-    //         to: BOB_ADDR,
-    //     })),]
-    // );
+    let expected_utxo_created_alice = SpendingRestriction::NoRestriction(99.into());
+    let expected_utxo_created_bob = SpendingRestriction::NoRestriction(1.into());
+
+    let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
+
+    assert_eq!(balances.alice, [(1u64, expected_utxo_created_alice)]);
+    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
+
+    // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
+    let events = deserialize_update_events(&update);
+    assert_eq!(
+        events,
+        [
+            TokenEvent::DestroyedUTXO(DestroyedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 0u64,
+                utxo: expected_utxo_destroyed,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 1u64,
+                utxo: expected_utxo_created_alice,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: TokenAmountU64(99),
+                from: ALICE_ADDR,
+                to: ALICE_ADDR,
+            })),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 2u64,
+                utxo: expected_utxo_created_bob,
+                at: BOB_ADDR,
+            }),
+            TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: TokenAmountU64(1),
+                from: ALICE_ADDR,
+                to: BOB_ADDR,
+            }))
+        ]
+    );
 }
 
 /// Test scheduled sender lock transfer where sender is the owner.
@@ -137,41 +171,63 @@ fn test_account_scheduled_sender_lock_transfer() {
 
     // Check that Alice now has 99 tokens and Bob has 1 token.
     let balances = get_balances(&chain, contract_address);
+    let expected_utxo_created_alice_1 = SpendingRestriction::NoRestriction(99.into());
+    let expected_utxo_created_alice_2 = SpendingRestriction::LockSender(ScheduleTransfer {
+        amount: ContractTokenAmount::from(1u64),
+        release_time: Timestamp::from_timestamp_millis(1000),
+    });
+    let expected_utxo_created_bob = SpendingRestriction::LockRecipient(ScheduleTransfer {
+        amount: ContractTokenAmount::from(1u64),
+        release_time: Timestamp::from_timestamp_millis(1000),
+    });
+    let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
+
     assert_eq!(
         balances.alice,
         [
-            (1u64, SpendingRestriction::NoRestriction(99.into())),
-            (
-                2u64,
-                SpendingRestriction::LockSender(ScheduleTransfer {
-                    amount: ContractTokenAmount::from(1u64),
-                    release_time: Timestamp::from_timestamp_millis(1000),
-                })
-            )
+            (1u64, expected_utxo_created_alice_1),
+            (2u64, expected_utxo_created_alice_2)
         ]
     );
-    assert_eq!(
-        balances.bob,
-        [(
-            2u64,
-            SpendingRestriction::LockRecipient(ScheduleTransfer {
-                amount: ContractTokenAmount::from(1u64),
-                release_time: Timestamp::from_timestamp_millis(1000),
-            })
-        )]
-    );
+    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
 
-    // // Check that a single transfer event occurred.
-    // let events = deserialize_update_events(&update);
-    // assert_eq!(
-    //     events,
-    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
-    //         token_id: TOKEN_ID_WCCD,
-    //         amount: TokenAmountU64(1),
-    //         from: ALICE_ADDR,
-    //         to: BOB_ADDR,
-    //     })),]
-    // );
+    // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
+    let events = deserialize_update_events(&update);
+    assert_eq!(
+        events,
+        [
+            TokenEvent::DestroyedUTXO(DestroyedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 0u64,
+                utxo: expected_utxo_destroyed,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 1u64,
+                utxo: expected_utxo_created_alice_1,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: TokenAmountU64(99),
+                from: ALICE_ADDR,
+                to: ALICE_ADDR,
+            })),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 2u64,
+                utxo: expected_utxo_created_alice_2,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 2u64,
+                utxo: expected_utxo_created_bob,
+                at: BOB_ADDR,
+            }),
+        ]
+    );
 }
 
 /// Test scheduled receiver lock transfer where sender is the owner.
@@ -224,32 +280,53 @@ fn test_account_scheduled_receiver_lock_transfer() {
 
     // Check that Alice now has 99 tokens and Bob has 1 token.
     let balances = get_balances(&chain, contract_address);
-    assert_eq!(
-        balances.alice,
-        [(1u64, SpendingRestriction::NoRestriction(99.into()))]
-    );
-    assert_eq!(
-        balances.bob,
-        [(
-            2u64,
-            SpendingRestriction::ScheduleTransfer(ScheduleTransfer {
-                amount: ContractTokenAmount::from(1u64),
-                release_time: Timestamp::from_timestamp_millis(1000),
-            })
-        )]
-    );
+    let expected_utxo_created_alice = SpendingRestriction::NoRestriction(99.into());
+    let expected_utxo_destroyed = SpendingRestriction::NoRestriction(100.into());
+    let expected_utxo_created_bob = SpendingRestriction::ScheduleTransfer(ScheduleTransfer {
+        amount: ContractTokenAmount::from(1u64),
+        release_time: Timestamp::from_timestamp_millis(1000),
+    });
 
-    // // Check that a single transfer event occurred.
-    // let events = deserialize_update_events(&update);
-    // assert_eq!(
-    //     events,
-    //     [WccdEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
-    //         token_id: TOKEN_ID_WCCD,
-    //         amount: TokenAmountU64(1),
-    //         from: ALICE_ADDR,
-    //         to: BOB_ADDR,
-    //     })),]
-    // );
+    assert_eq!(balances.alice, [(1u64, expected_utxo_created_alice)]);
+    assert_eq!(balances.bob, [(2u64, expected_utxo_created_bob)]);
+
+    // Check that a destroy UTXO, a create UTOX, and a transfer event occurred.
+    let events = deserialize_update_events(&update);
+    assert_eq!(
+        events,
+        [
+            TokenEvent::DestroyedUTXO(DestroyedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 0u64,
+                utxo: expected_utxo_destroyed,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 1u64,
+                utxo: expected_utxo_created_alice,
+                at: ALICE_ADDR,
+            }),
+            TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: TokenAmountU64(99),
+                from: ALICE_ADDR,
+                to: ALICE_ADDR,
+            })),
+            TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: 2u64,
+                utxo: expected_utxo_created_bob,
+                at: BOB_ADDR,
+            }),
+            TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                token_id: TOKEN_ID,
+                amount: TokenAmountU64(1),
+                from: ALICE_ADDR,
+                to: BOB_ADDR,
+            })),
+        ]
+    );
 }
 
 // /// Test that init produces the correct logs.
@@ -1017,13 +1094,13 @@ fn get_balances(chain: &Chain, contract_address: ContractAddress) -> Balances {
     }
 }
 
-// /// Deserialize the events from an update.
-// fn deserialize_update_events(update: &ContractInvokeSuccess) -> Vec<WccdEvent> {
-//     update
-//         .events()
-//         .flat_map(|(_addr, events)| events.iter().map(|e| e.parse().expect("Deserialize event")))
-//         .collect()
-// }
+/// Deserialize the events from an update.
+fn deserialize_update_events(update: &ContractInvokeSuccess) -> Vec<TokenEvent> {
+    update
+        .events()
+        .flat_map(|(_addr, events)| events.iter().map(|e| e.parse().expect("Deserialize event")))
+        .collect()
+}
 
 // /// Check that the returned error is `ContractPaused`.
 // fn assert_contract_paused_error(update: &ContractInvokeError) {
