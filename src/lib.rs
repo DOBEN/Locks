@@ -53,9 +53,11 @@
 //! This is because the on-chain UTXO_SET is unbounded and we cannot/should not iterate over unbounded/large sets in a smart contract, meaning we should NOT provide a query function
 //! over the whole UTXO_SET on-chain.
 //!
+//! TODO: Include a mechanism for allowing `utxo_index` to overflow (or at least to use the
+//!  old funds even if no new `utxo_index` is available anymore).
 #![cfg_attr(not(feature = "std"), no_std)]
 use concordium_cis2::{Cis2Event, *};
-use concordium_std::*;
+use concordium_std::{collections::BTreeMap, *};
 
 /// The id of the token in this contract.
 pub const TOKEN_ID: ContractTokenId = TokenIdUnit();
@@ -80,6 +82,145 @@ pub type ContractTokenId = TokenIdUnit;
 /// of arithmetics.
 pub type ContractTokenAmount = TokenAmountU64;
 
+/// Event tags.
+pub const CREATED_UTXO_EVENT_TAG: u8 = 0;
+pub const DESTROYED_UTXO_EVENT_TAG: u8 = 1;
+
+/// Tagged events to be serialized for the event log.
+#[derive(Debug, Serial, Deserial, PartialEq, Eq)]
+#[concordium(repr(u8))]
+pub enum TokenEvent {
+    ///
+    #[concordium(tag = 0)]
+    CreatedUTXO(CreatedUTXOEvent),
+    ///
+    #[concordium(tag = 1)]
+    DestroyedUTXO(DestroyedUTXOEvent),
+    /// Cis2 token events.
+    #[concordium(forward = cis2_events)]
+    Cis2Event(Cis2Event<ContractTokenId, ContractTokenAmount>),
+}
+
+///
+#[derive(Debug, Serialize, SchemaType, PartialEq, Eq)]
+pub struct DestroyedUTXOEvent {
+    ///
+    pub token_id: ContractTokenId,
+    ///
+    pub utxo_index: u64,
+    ///
+    pub utxo: SpendingRestriction,
+    ///
+    pub at: Address,
+}
+
+///
+#[derive(Debug, Serialize, SchemaType, PartialEq, Eq)]
+pub struct CreatedUTXOEvent {
+    ///
+    pub token_id: ContractTokenId,
+    ///
+    pub utxo_index: u64,
+    ///
+    pub utxo: SpendingRestriction,
+    ///
+    pub at: Address,
+}
+
+// Implementing a custom schemaType for the `TokenEvent` struct containing all
+// CIS2 events and custom events of this token contract. This custom implementation flattens the fields to avoid one
+// level of nesting. Deriving the schemaType would result in e.g.: {"Nonce":
+// [{...fields}] }. In contrast, this custom schemaType implementation results
+// in e.g.: {"Nonce": {...fields} }
+impl schema::SchemaType for TokenEvent {
+    fn get_type() -> schema::Type {
+        let mut event_map = BTreeMap::new();
+        // Custom events:
+        event_map.insert(
+            CREATED_UTXO_EVENT_TAG,
+            (
+                "CreatedUTXO".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("utxo_index"), u64::get_type()),
+                    (String::from("utxo"), SpendingRestriction::get_type()),
+                    (String::from("at"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            DESTROYED_UTXO_EVENT_TAG,
+            (
+                "DestroyedUTXO".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("utxo_index"), u64::get_type()),
+                    (String::from("utxo"), SpendingRestriction::get_type()),
+                    (String::from("at"), Address::get_type()),
+                ]),
+            ),
+        );
+
+        // CIS2 events:
+        event_map.insert(
+            TRANSFER_EVENT_TAG,
+            (
+                "Transfer".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("amount"), ContractTokenAmount::get_type()),
+                    (String::from("from"), Address::get_type()),
+                    (String::from("to"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            MINT_EVENT_TAG,
+            (
+                "Mint".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("amount"), ContractTokenAmount::get_type()),
+                    (String::from("owner"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            BURN_EVENT_TAG,
+            (
+                "Burn".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("amount"), ContractTokenAmount::get_type()),
+                    (String::from("owner"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            UPDATE_OPERATOR_EVENT_TAG,
+            (
+                "UpdateOperator".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("update"), OperatorUpdate::get_type()),
+                    (String::from("owner"), Address::get_type()),
+                    (String::from("operator"), Address::get_type()),
+                ]),
+            ),
+        );
+        event_map.insert(
+            TOKEN_METADATA_EVENT_TAG,
+            (
+                "TokenMetadata".to_string(),
+                schema::Fields::Named(vec![
+                    (String::from("token_id"), ContractTokenId::get_type()),
+                    (String::from("metadata_url"), MetadataUrl::get_type()),
+                ]),
+            ),
+        );
+        schema::Type::TaggedEnum(event_map)
+    }
+}
+
 #[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd, Clone)]
 pub struct Lock {
     pub amount: ContractTokenAmount,
@@ -87,14 +228,14 @@ pub struct Lock {
     pub remove_time: Timestamp,
 }
 
-#[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd, Clone, Copy)]
 pub struct ScheduleTransfer {
     pub amount: ContractTokenAmount,
     /// Time when the schedule is expired and the account is free to transfer these funds.
     pub release_time: Timestamp,
 }
 
-#[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd, Clone, Copy)]
 pub enum SpendingRestriction {
     NoRestriction(ContractTokenAmount),
     LockRecipient(ScheduleTransfer),
@@ -112,14 +253,22 @@ impl SpendingRestriction {
         }
     }
 
-    fn action_time(self) -> Option<Timestamp> {
+    fn release_time(self) -> Option<Timestamp> {
         match self {
             SpendingRestriction::NoRestriction(_) => None,
             SpendingRestriction::LockRecipient(lock) => Some(lock.release_time),
-            SpendingRestriction::LockSender(lock) => Some(lock.release_time),
+            SpendingRestriction::LockSender(_) => None,
             SpendingRestriction::ScheduleTransfer(schedule_transfer) => {
                 Some(schedule_transfer.release_time)
             }
+        }
+    }
+    fn remove_time(self) -> Option<Timestamp> {
+        match self {
+            SpendingRestriction::NoRestriction(_) => None,
+            SpendingRestriction::LockRecipient(_) => None,
+            SpendingRestriction::LockSender(lock) => Some(lock.release_time),
+            SpendingRestriction::ScheduleTransfer(_) => None,
         }
     }
 }
@@ -242,19 +391,40 @@ fn transfer(
 
             let sender_utxo_in_state = sender_token_state.utxo_map.remove_and_get(&utox.utxo_index);
 
-            if let Some(sender_utxo) = sender_utxo_in_state {
-                // Ensure that the `in_utxos` have no spending restriction (e.g., locks and scheduled transfers are past the release timestamp).
-                if let Some(release_time) = sender_utxo.action_time() {
-                    ensure!(
-                        release_time < ctx.metadata().slot_time(),
-                        ContractError::Custom(CustomContractError::SpendingRestriction)
-                    );
-                }
-            } else {
-                return Err(ContractError::Custom(
-                    CustomContractError::InputUTXOIndexError,
-                ));
+            // TODO: Maybe enable `operators` to spend UTXOs on behalf of the sender, similar to:
+            //
+            // // Authenticate the sender for this transfer
+            // ensure!(
+            //     from == sender || state.is_operator(&sender, &from),
+            //     ContractError::Unauthorized
+            // );
+
+            // Check that `UTXO_in` exists in sender's state.
+            ensure!(sender_utxo_in_state.is_some(), ContractError::Unauthorized);
+            let sender_utxo_in_state = sender_utxo_in_state.unwrap();
+
+            // Ensure that the `in_utxos` have no spending restriction
+            // (e.g., locks and scheduled transfers are past/before the release/remove timestamps).
+            if let Some(release_time) = sender_utxo_in_state.release_time() {
+                ensure!(
+                    release_time >= ctx.metadata().slot_time(),
+                    ContractError::Custom(CustomContractError::SpendingRestriction)
+                );
             }
+            if let Some(remove_time) = sender_utxo_in_state.remove_time() {
+                ensure!(
+                    remove_time < ctx.metadata().slot_time(),
+                    ContractError::Custom(CustomContractError::SpendingRestriction)
+                );
+            }
+
+            // Log destroyed UTXO event
+            logger.log(&TokenEvent::DestroyedUTXO(DestroyedUTXOEvent {
+                token_id: TOKEN_ID,
+                utxo_index: utox.utxo_index,
+                utxo: sender_utxo_in_state,
+                at: sender,
+            }))?;
         }
     }
 
@@ -268,64 +438,125 @@ fn transfer(
         //   or the `change` UTXO (last element in the `out_utxos` vector) that is usually added the the recipients's UTXO set.
         match utox.spending_restriction {
             SpendingRestrictionToCreate::NoRestriction(amount) => {
+                let utxo_index = state.utxo_counter;
+                let utxo = SpendingRestriction::NoRestriction(amount);
+                let recipient = utox.recipient;
+
                 let mut receipient_token_state =
                     state
                         .token
-                        .entry(utox.recipient)
+                        .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
                             // total_balance:amount,
                             operators: state_builder.new_set(),
                         });
-                _ = receipient_token_state.utxo_map.insert(
-                    state.utxo_counter,
-                    SpendingRestriction::NoRestriction(amount),
-                );
+                _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
+
+                // Log created UTXO event
+                logger.log(&TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                    token_id: TOKEN_ID,
+                    utxo_index,
+                    utxo,
+                    at: recipient,
+                }))?;
+
+                // Log CIS2 transfer event
+                logger.log(&TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                    token_id: TOKEN_ID,
+                    amount,
+                    from: sender,
+                    to: recipient,
+                })))?;
             }
             SpendingRestrictionToCreate::Lock(schedule_transfer) => {
+                // Update of the sender's state
                 {
+                    let utxo_index = state.utxo_counter;
+                    let utxo = SpendingRestriction::LockSender(schedule_transfer.clone());
+
                     let mut sender_token_state = state
                         .token
                         .get_mut(&sender)
                         .ok_or(ContractError::InsufficientFunds)?;
 
-                    _ = sender_token_state.utxo_map.insert(
-                        state.utxo_counter,
-                        SpendingRestriction::LockSender(schedule_transfer.clone()),
-                    );
+                    _ = sender_token_state.utxo_map.insert(utxo_index, utxo);
+
+                    // Log created UTXO event
+                    logger.log(&TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                        token_id: TOKEN_ID,
+                        utxo_index,
+                        utxo,
+                        at: sender,
+                    }))?;
                 }
+
+                // Update of the recipient's state
+                let utxo_index = state.utxo_counter;
+                let utxo = SpendingRestriction::LockRecipient(schedule_transfer);
+                let recipient = utox.recipient;
 
                 let mut receipient_token_state =
                     state
                         .token
-                        .entry(utox.recipient)
+                        .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
                             // total_balance: 0u64.into(),
                             operators: state_builder.new_set(),
                         });
-                _ = receipient_token_state.utxo_map.insert(
-                    state.utxo_counter,
-                    SpendingRestriction::LockRecipient(schedule_transfer),
-                );
+                _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
+
+                // Log created UTXO event
+                logger.log(&TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                    token_id: TOKEN_ID,
+                    utxo_index,
+                    utxo,
+                    at: recipient,
+                }))?;
+
+                // Log CIS2 transfer event
+                logger.log(&TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                    token_id: TOKEN_ID,
+                    amount: schedule_transfer.amount,
+                    from: sender,
+                    to: recipient,
+                })))?;
             }
             SpendingRestrictionToCreate::ScheduleTransfer(schedule_transfer) => {
+                let utxo_index = state.utxo_counter;
+                let utxo = SpendingRestriction::ScheduleTransfer(schedule_transfer);
+                let recipient = utox.recipient;
+
                 let mut receipient_token_state =
                     state
                         .token
-                        .entry(utox.recipient)
+                        .entry(recipient)
                         .or_insert_with(|| AddressState {
                             utxo_map: state_builder.new_map(),
                             // total_balance: 0u64.into(),
                             operators: state_builder.new_set(),
                         });
-                _ = receipient_token_state.utxo_map.insert(
-                    state.utxo_counter,
-                    SpendingRestriction::ScheduleTransfer(schedule_transfer),
-                );
+                _ = receipient_token_state.utxo_map.insert(utxo_index, utxo);
+
+                // Log created UTXO event
+                logger.log(&TokenEvent::CreatedUTXO(CreatedUTXOEvent {
+                    token_id: TOKEN_ID,
+                    utxo_index,
+                    utxo,
+                    at: recipient,
+                }))?;
+
+                // Log CIS2 transfer event
+                logger.log(&TokenEvent::Cis2Event(Cis2Event::Transfer(TransferEvent {
+                    token_id: TOKEN_ID,
+                    amount: schedule_transfer.amount,
+                    from: sender,
+                    to: recipient,
+                })))?;
             }
         }
-        state.utxo_counter += 1
+        state.utxo_counter += 1;
     }
 
     // Check that the sum of the amounts in `in_utxos` equals the sum of the amounts in `out_utxos`.
@@ -334,7 +565,8 @@ fn transfer(
         ContractError::Custom(CustomContractError::MismatchOfUTXOSums)
     );
 
-    // TODO: Emit events of the `destroyed` UTXOs and the `created` UTXOs (e.g. TransferEvent).
+    // TODO: If the receivers are contracts: invoke the receive hook functions.
+
     Ok(())
 }
 
@@ -346,10 +578,6 @@ pub struct SetMetadataUrlParams {
     /// The hash of the document stored at the above URL.
     pub hash: Option<Sha256>,
 }
-
-/// Tagged events to be serialized for the event log.
-//  #[derive(SchemaType, Serialize, PartialEq, Eq, Debug)]
-pub type TokenEvent = Cis2Event<ContractTokenId, ContractTokenAmount>;
 
 /// The different errors the contract can produce.
 #[derive(Serialize, Debug, PartialEq, Eq, Reject, SchemaType)]
@@ -365,7 +593,6 @@ pub enum CustomContractError {
     InvokeContractError,
     /// Failed to invoke a transfer.
     InvokeTransferError,
-    InputUTXOIndexError,
     MismatchOfUTXOSums,
     SpendingRestriction,
 }
@@ -424,39 +651,6 @@ impl State {
         //     .get(address)
         //     .map(|s| s.total_balance)
         //     .unwrap_or_else(|| 0u64.into()))
-    }
-
-    // TODO
-    /// Update the state with a transfer.
-    fn transfer(
-        &mut self,
-        amount: ContractTokenAmount,
-        from: &Address,
-        to: &Address,
-        state_builder: &mut StateBuilder,
-    ) -> ContractResult<()> {
-        if amount == 0u64.into() {
-            return Ok(());
-        }
-        // {
-        //     let mut from_state = self
-        //         .token
-        //         .get_mut(from)
-        //         .ok_or(ContractError::InsufficientFunds)?;
-        //     ensure!(
-        //         from_state.total_balance >= amount,
-        //         ContractError::InsufficientFunds
-        //     );
-        //     from_state.total_balance -= amount;
-        // }
-        // let mut to_state = self.token.entry(*to).or_insert_with(|| AddressState {
-        //     utxo_map: state_builder.new_map(),
-        //     total_balance: 0u64.into(),
-        //     operators: state_builder.new_set(),
-        // });
-        // to_state.total_balance += amount;
-
-        Ok(())
     }
 
     /// Check if an address is an operator of a specific owner address.
@@ -543,10 +737,12 @@ fn contract_init(
     let state = State::new(state_builder, metadata_url.clone());
 
     // Log event for where to find metadata for the token
-    logger.log(&TokenEvent::TokenMetadata(TokenMetadataEvent {
-        token_id: TOKEN_ID,
-        metadata_url,
-    }))?;
+    logger.log(&TokenEvent::Cis2Event(Cis2Event::TokenMetadata(
+        TokenMetadataEvent {
+            token_id: TOKEN_ID,
+            metadata_url,
+        },
+    )))?;
 
     Ok(state)
 }
@@ -602,93 +798,12 @@ fn contract_mint(
     }
 
     // Log event for the newly minted token.
-    logger.log(&TokenEvent::Mint(MintEvent {
+    logger.log(&TokenEvent::Cis2Event(Cis2Event::Mint(MintEvent {
         token_id: TOKEN_ID,
         amount: params.amount,
         owner,
-    }))?;
+    })))?;
 
-    Ok(())
-}
-
-type TransferParameter = TransferParams<ContractTokenId, ContractTokenAmount>;
-
-/// Execute a list of token transfers, in the order of the list.
-///
-/// Logs a `Transfer` event and invokes a receive hook function for every
-/// transfer in the list.
-///
-/// It rejects if:
-/// - It fails to parse the parameter.
-/// - Any of the transfers fail to be executed, which could be if:
-///     - The `token_id` does not exist.
-///     - The sender is not the owner of the token, or an operator for this
-///       specific `token_id` and `from` address.
-///     - The token is not owned by the `from`.
-/// - Fails to log event.
-/// - Any of the receive hook function calls rejects.
-#[receive(
-    contract = "token",
-    name = "old_transfer",
-    parameter = "TransferParameter",
-    error = "ContractError",
-    enable_logger,
-    mutable
-)]
-fn old_transfer(
-    ctx: &ReceiveContext,
-    host: &mut Host<State>,
-    logger: &mut impl HasLogger,
-) -> ContractResult<()> {
-    // Parse the parameter.
-    let TransferParams(transfers): TransferParameter = ctx.parameter_cursor().get()?;
-    // Get the sender who invoked this contract function.
-    let sender = ctx.sender();
-
-    for Transfer {
-        token_id,
-        amount,
-        from,
-        to,
-        data,
-    } in transfers
-    {
-        ensure_eq!(token_id, TOKEN_ID, ContractError::InvalidTokenId);
-
-        let (state, builder) = host.state_and_builder();
-        // Authenticate the sender for this transfer
-        ensure!(
-            from == sender || state.is_operator(&sender, &from),
-            ContractError::Unauthorized
-        );
-        let to_address = to.address();
-        // Update the contract state
-        state.transfer(amount, &from, &to_address, builder)?;
-
-        // Log transfer event
-        logger.log(&TokenEvent::Transfer(TransferEvent {
-            token_id: TOKEN_ID,
-            amount,
-            from,
-            to: to_address,
-        }))?;
-
-        // If the receiver is a contract: invoke the receive hook function.
-        if let Receiver::Contract(address, function) = to {
-            let parameter = OnReceivingCis2Params {
-                token_id: TOKEN_ID,
-                amount,
-                from,
-                data,
-            };
-            host.invoke_contract(
-                &address,
-                &parameter,
-                function.as_entrypoint_name(),
-                Amount::zero(),
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -725,11 +840,13 @@ fn contract_update_operator(
         }
 
         // Log the appropriate event
-        logger.log(&TokenEvent::UpdateOperator(UpdateOperatorEvent {
-            owner: sender,
-            operator: param.operator,
-            update: param.update,
-        }))?;
+        logger.log(&TokenEvent::Cis2Event(Cis2Event::UpdateOperator(
+            UpdateOperatorEvent {
+                owner: sender,
+                operator: param.operator,
+                update: param.update,
+            },
+        )))?;
     }
 
     Ok(())
